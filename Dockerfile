@@ -3,7 +3,7 @@ FROM ubuntu:noble
 SHELL ["/bin/bash", "-xo", "pipefail", "-c"]
 
 # Generate locale C.UTF-8 for postgres and general locale data
-ENV LANG en_US.UTF-8
+ENV LANG=en_US.UTF-8
 
 # Retrieve the target architecture to install the correct wkhtmltopdf package
 ARG TARGETARCH
@@ -36,6 +36,14 @@ RUN apt-get update && \
         python3-watchdog \
         python3-xlrd \
         python3-xlwt \
+        python3-full \
+        python3-venv \
+        python3-dev \
+        libpq-dev \
+        postgresql-server-dev-all \
+        build-essential \
+        libldap2-dev \
+        libsasl2-dev \
         xz-utils && \
     if [ -z "${TARGETARCH}" ]; then \
         TARGETARCH="$(dpkg --print-architecture)"; \
@@ -72,12 +80,17 @@ RUN npm install -g rtlcss
 COPY . /opt/odoo
 WORKDIR /opt/odoo
 
+# Create and activate virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 # Install Python dependencies
-RUN pip3 install -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Create Odoo user
 RUN useradd -md /home/odoo -s /bin/false odoo \
-    && chown -R odoo /opt/odoo
+    && chown -R odoo /opt/odoo \
+    && chown -R odoo /opt/venv
 
 # Copy entrypoint script and Odoo configuration file
 COPY ./entrypoint.sh /
@@ -93,7 +106,7 @@ VOLUME ["/var/lib/odoo", "/mnt/extra-addons"]
 EXPOSE 8069 8071 8072
 
 # Set the default config file
-ENV ODOO_RC /etc/odoo/odoo.conf
+ENV ODOO_RC=/etc/odoo/odoo.conf
 
 COPY wait-for-psql.py /usr/local/bin/wait-for-psql.py
 
