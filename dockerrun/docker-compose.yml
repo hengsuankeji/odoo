@@ -1,0 +1,40 @@
+version: '3'
+services:
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_PASSWORD=123456
+      - POSTGRES_USER=odoo
+    volumes:
+      - odoo-db-data:/var/lib/postgresql/data
+    restart: always
+    networks:
+      - odoo-network
+
+  odoo:
+    image: ultra:2.0
+    depends_on:
+      - db
+    ports:
+      - "8069:8069"  # 修改为允许所有IP访问
+      - "8072:8072"  # 修改为允许所有IP访问
+    volumes:
+      - ./config:/etc/odoo
+      - odoo-web-data:/var/lib/odoo
+      - ./extra-addons:/mnt/extra-addons
+    environment:
+      - HOST=db
+      - USER=odoo
+      - PASSWORD=123456
+    restart: always
+    networks:
+      - odoo-network
+
+volumes:
+  odoo-db-data:
+  odoo-web-data:
+
+networks:
+  odoo-network:
+    driver: bridge
