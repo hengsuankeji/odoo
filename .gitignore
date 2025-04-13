@@ -49,3 +49,9 @@ package.json
 /man/
 /share/
 /src/
+/dev/addons/
+
+# Odoo开发环境
+/odoo-venv/
+/data/
+*.log
