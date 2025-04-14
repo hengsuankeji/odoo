@@ -84,7 +84,7 @@ def initialize(cr):
         cr.execute("""
         SELECT m.name FROM ir_module_module m
         WHERE m.auto_install
-        AND state not in ('to install', 'uninstallable')
+        AND state != 'to install'
         AND NOT EXISTS (
             SELECT 1 FROM ir_module_module_dependency d
             JOIN ir_module_module mdep ON (d.name = mdep.name)

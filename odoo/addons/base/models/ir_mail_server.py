@@ -632,19 +632,12 @@ class IrMailServer(models.Model):
         email_bcc = message['Bcc']
         del message['Bcc']
 
-        # All recipient addresses must only contain ASCII characters; support
-        # optional pre-validated To list, used notably when formatted emails may
-        # create fake emails using extract_rfc2822_addresses, e.g.
-        # '"Bike@Home" <email@domain.com>' which can be considered as containing
-        # 2 emails by extract_rfc2822_addresses
-        validated_to = self.env.context.get('send_validated_to') or []
+        # All recipient addresses must only contain ASCII characters
         smtp_to_list = [
             address
             for base in [email_to, email_cc, email_bcc]
-            # be sure a given address does not return duplicates (but duplicates
-            # in final smtp to list is still ok)
-            for address in tools.misc.unique(extract_rfc2822_addresses(base))
-            if address and (not validated_to or address in validated_to)
+            for address in extract_rfc2822_addresses(base)
+            if address
         ]
         assert smtp_to_list, self.NO_VALID_RECIPIENT
 
@@ -662,7 +655,7 @@ class IrMailServer(models.Model):
         notifications_email = email_normalize(
             self.env.context.get('domain_notifications_email') or self._get_default_from_address()
         )
-        if notifications_email and email_normalize(smtp_from) == notifications_email and email_normalize(message['From']) != notifications_email:
+        if notifications_email and smtp_from == notifications_email and message['From'] != notifications_email:
             smtp_from = encapsulate_email(message['From'], notifications_email)
 
         if message['From'] != smtp_from:
@@ -786,7 +779,7 @@ class IrMailServer(models.Model):
 
         # 1. Try to find a mail server for the right mail from
         # Skip if passed email_from is False (example Odoobot has no email address)
-        if email_from_normalized:
+        if email_from:
             if mail_server := first_match(email_from_normalized, email_normalize):
                 return mail_server, email_from
 

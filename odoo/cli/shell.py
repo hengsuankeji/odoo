@@ -4,7 +4,6 @@ import logging
 import os
 import signal
 import sys
-import threading
 from pathlib import Path
 
 import odoo
@@ -108,7 +107,6 @@ class Shell(Command):
             'odoo': odoo,
         }
         if dbname:
-            threading.current_thread().dbname = dbname
             registry = Registry(dbname)
             with registry.cursor() as cr:
                 uid = odoo.SUPERUSER_ID

@@ -7,12 +7,10 @@ from urllib.parse import urlparse
 
 from odoo import api, fields, models, tools, SUPERUSER_ID, _
 from odoo.exceptions import UserError, AccessError, RedirectWarning
-from odoo.service import security
 from odoo.tools.safe_eval import safe_eval, time
 from odoo.tools.misc import find_in_path
 from odoo.tools import check_barcode_encoding, config, is_html_empty, parse_version, split_every
-from odoo.http import request, root
-from odoo.tools.pdf import PdfFileWriter, PdfFileReader, PdfReadError
+from odoo.http import request
 from odoo.osv.expression import NEGATIVE_TERM_OPERATORS, FALSE_DOMAIN
 
 import io
@@ -28,6 +26,7 @@ from lxml import etree
 from contextlib import closing
 from reportlab.graphics.barcode import createBarcodeDrawing
 from reportlab.pdfbase.pdfmetrics import getFont, TypeFace
+from PyPDF2 import PdfFileWriter, PdfFileReader
 from collections import OrderedDict
 from collections.abc import Iterable
 from PIL import Image, ImageFile
@@ -35,6 +34,11 @@ from itertools import islice
 
 # Allow truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+try:
+    from PyPDF2.errors import PdfReadError
+except ImportError:
+    from PyPDF2.utils import PdfReadError
 
 _logger = logging.getLogger(__name__)
 
@@ -528,23 +532,12 @@ class IrActionsReport(models.Model):
 
         files_command_args = []
         temporary_files = []
-        temp_session = None
 
         # Passing the cookie to wkhtmltopdf in order to resolve internal links.
         if request and request.db:
-            # Create a temporary session which will not create device logs
-            temp_session = root.session_store.new()
-            temp_session.update({
-                **request.session,
-                '_trace_disable': True,
-            })
-            if temp_session.uid:
-                temp_session.session_token = security.compute_session_token(temp_session, self.env)
-            root.session_store.save(temp_session)
-
             base_url = self._get_report_url()
             domain = urlparse(base_url).hostname
-            cookie = f'session_id={temp_session.sid}; HttpOnly; domain={domain}; path=/;'
+            cookie = f'session_id={request.session.sid}; HttpOnly; domain={domain}; path=/;'
             cookie_jar_file_fd, cookie_jar_file_path = tempfile.mkstemp(suffix='.txt', prefix='report.cookie_jar.tmp.')
             temporary_files.append(cookie_jar_file_path)
             with closing(os.fdopen(cookie_jar_file_fd, 'wb')) as cookie_jar_file:
@@ -614,9 +607,6 @@ class IrActionsReport(models.Model):
                     _logger.warning('wkhtmltopdf: %s' % err)
         except:
             raise
-        finally:
-            if temp_session:
-                root.session_store.delete(temp_session)
 
         with open(pdf_report_path, 'rb') as pdf_document:
             pdf_content = pdf_document.read()
@@ -961,7 +951,7 @@ class IrActionsReport(models.Model):
 
             # if res_id is false
             # we are unable to fetch the record, it won't be saved as we can't split the documents unambiguously
-            if not res_id or not stream_data['stream']:
+            if not res_id:
                 _logger.warning(
                     "These documents were not saved as an attachment because the template of %s doesn't "
                     "have any headers seperating different instances of it. If you want it saved,"

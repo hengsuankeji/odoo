@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+import threading
+
 from contextlib import contextmanager
 from unittest.mock import patch, Mock
 
-from odoo import Command, modules
 from odoo.tests.common import new_test_user, TransactionCase, HttpCase
-from odoo.tools.mail import email_split_and_format
+from odoo import Command, modules
 
 DISABLED_MAIL_CONTEXT = {
     'tracking_disable': True,
@@ -196,7 +197,6 @@ class HttpCaseWithUserDemo(HttpCase):
             cls.partner_demo = cls.env['res.partner'].create({
                 'name': 'Marc Demo',
                 'email': 'mark.brown23@example.com',
-                'tz': 'UTC'
             })
             cls.user_demo = cls.env['res.users'].create({
                 'login': 'demo',
@@ -400,15 +400,17 @@ class MockSmtplibCase:
 
             def send_message(self, message, smtp_from, smtp_to_list):
                 origin.emails.append({
-                    # message
-                    'message': message.as_string(),
-                    'msg_cc': message['Cc'],
-                    'msg_from': message['From'],
-                    'msg_from_fmt': email_split_and_format(message['From'])[0],
-                    'msg_to': message['To'],
-                    # smtp
                     'smtp_from': smtp_from,
                     'smtp_to_list': smtp_to_list,
+                    'message': message.as_string(),
+                    'from_filter': self.from_filter,
+                })
+
+            def sendmail(self, smtp_from, smtp_to_list, message_str, mail_options):
+                origin.emails.append({
+                    'smtp_from': smtp_from,
+                    'smtp_to_list': smtp_to_list,
+                    'message': message_str,
                     'from_filter': self.from_filter,
                 })
 
@@ -451,14 +453,12 @@ class MockSmtplibCase:
             yield
 
     def _build_email(self, mail_from, return_path=None, **kwargs):
-        headers = {'Return-Path': return_path} if return_path else {}
-        headers.update(**kwargs.pop('headers', {}))
         return self.env['ir.mail_server'].build_email(
             mail_from,
             kwargs.pop('email_to', 'dest@example-é.com'),
             kwargs.pop('subject', 'subject'),
             kwargs.pop('body', 'body'),
-            headers=headers,
+            headers={'Return-Path': return_path} if return_path else None,
             **kwargs,
         )
 
@@ -467,63 +467,54 @@ class MockSmtplibCase:
             self.env['ir.mail_server'].send_email(msg, smtp_session=smtp_session)
         return smtp_session.messages.pop()
 
-    def assertSMTPEmailsSent(self, smtp_from=None, smtp_to_list=None,
-                             message_from=None, msg_from=None,
+    def assertSMTPEmailsSent(self, smtp_from=None, smtp_to_list=None, message_from=None,
                              mail_server=None, from_filter=None,
-                             emails_count=1,
-                             msg_cc_lst=None, msg_to_lst=None):
+                             emails_count=1):
         """Check that the given email has been sent. If one of the parameter is
         None it is just ignored and not used to retrieve the email.
 
         :param smtp_from: FROM used for the authentication to the mail server
         :param smtp_to_list: List of destination email address
         :param message_from: FROM used in the SMTP headers
-        :param mail_server: used to compare the 'from_filter' as an alternative
+        :arap mail_server: used to compare the 'from_filter' as an alternative
           to using the from_filter parameter
         :param from_filter: from_filter of the <ir.mail_server> used to send the
           email. False means 'match everything';'
         :param emails_count: the number of emails which should match the condition
-        :param msg_cc: optional check msg_cc value of email;
-        :param msg_to: optional check msg_to value of email;
-
         :return: True if at least one email has been found with those parameters
         """
         if from_filter is not None and mail_server:
             raise ValueError('Invalid usage: use either from_filter either mail_server')
-
         if from_filter is None and mail_server is not None:
             from_filter = mail_server.from_filter
-        matching_emails = list(filter(
+        matching_emails = filter(
             lambda email:
                 (smtp_from is None or smtp_from == email['smtp_from'])
                 and (smtp_to_list is None or smtp_to_list == email['smtp_to_list'])
                 and (message_from is None or 'From: %s' % message_from in email['message'])
-                # might have header being name <email> instead of "name" <email>, to check
-                and (msg_from is None or (msg_from == email['msg_from'] or msg_from == email['msg_from_fmt']))
                 and (from_filter is None or from_filter == email['from_filter']),
             self.emails,
-        ))
+        )
 
         debug_info = ''
-        matching_emails_count = len(matching_emails)
+        matching_emails_count = len(list(matching_emails))
         if matching_emails_count != emails_count:
+            emails_from = []
+            for email in self.emails:
+                from_found = next((
+                    line.split('From:')[1].strip() for line in email['message'].splitlines()
+                    if line.startswith('From:')), '')
+                emails_from.append(from_found)
             debug_info = '\n'.join(
-                f"SMTP-From: {email['smtp_from']}, SMTP-To: {email['smtp_to_list']}, "
-                f"Msg-From: {email['msg_from']}, From_filter: {email['from_filter']})"
-                for email in self.emails
+                f"SMTP-From: {email['smtp_from']}, SMTP-To: {email['smtp_to_list']}, Msg-From: {email_msg_from}, From_filter: {email['from_filter']})"
+                for email, email_msg_from in zip(self.emails, emails_from)
             )
         self.assertEqual(
             matching_emails_count, emails_count,
             msg=f'Incorrect emails sent: {matching_emails_count} found, {emails_count} expected'
-                f'\nConditions\nSMTP-From: {smtp_from}, SMTP-To: {smtp_to_list}, Msg-From: {message_from or msg_from}, From_filter: {from_filter}'
+                f'\nConditions\nSMTP-From: {smtp_from}, SMTP-To: {smtp_to_list}, Msg-From: {message_from}, From_filter: {from_filter}'
                 f'\nNot found in\n{debug_info}'
         )
-        if msg_to_lst is not None:
-            for email in matching_emails:
-                self.assertListEqual(sorted(email_split_and_format(email['msg_to'])), sorted(msg_to_lst))
-        if msg_cc_lst is not None:
-            for email in matching_emails:
-                self.assertListEqual(sorted(email_split_and_format(email['msg_cc'])), sorted(msg_cc_lst))
 
     @classmethod
     def _init_mail_gateway(cls):

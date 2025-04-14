@@ -107,8 +107,6 @@ class OdooBaseChecker(BaseChecker):
 
     def _evaluate_function_call(self, node, args_allowed, position):
         name = node.func.attrname if isinstance(node.func, astroid.Attribute) else node.func.name
-        if name == 'SQL':
-            return True
         if isinstance(node.scope(), astroid.GeneratorExp):
             return True
         if name == node.scope().name:
@@ -198,10 +196,7 @@ class OdooBaseChecker(BaseChecker):
                 elif isinstance(n.parent, astroid.Module):
                     return True
                 else:
-                    if isinstance(n.parent, astroid.Comprehension):
-                        assigned_node += [self._is_constexpr(n.parent.iter, args_allowed=args_allowed)]
-                    else:
-                        assigned_node += [self._is_constexpr(n.parent.value, args_allowed=args_allowed)]
+                    assigned_node += [self._is_constexpr(n.parent.value, args_allowed=args_allowed)]
             if assigned_node and all(assigned_node):
                 return True
             return self._is_asserted(node)

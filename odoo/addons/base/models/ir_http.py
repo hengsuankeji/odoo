@@ -56,11 +56,11 @@ class RequestUID(object):
 
 
 class ModelConverter(werkzeug.routing.BaseConverter):
-    regex = r'[0-9]+'
 
     def __init__(self, url_map, model=False):
-        super().__init__(url_map)
+        super(ModelConverter, self).__init__(url_map)
         self.model = model
+        self.regex = r'([0-9]+)'
 
         IrHttp = Registry(threading.current_thread().dbname)['ir.http']
         self.slug = IrHttp._slug
@@ -76,11 +76,12 @@ class ModelConverter(werkzeug.routing.BaseConverter):
 
 
 class ModelsConverter(werkzeug.routing.BaseConverter):
-    regex = r'[0-9,]+'
 
     def __init__(self, url_map, model=False):
-        super().__init__(url_map)
+        super(ModelsConverter, self).__init__(url_map)
         self.model = model
+        # TODO add support for slug in the form [A-Za-z0-9-] bla-bla-89 -> id 89
+        self.regex = r'([0-9,]+)'
 
     def to_python(self, value: str) -> models.BaseModel:
         _uid = RequestUID(value=value, converter=self)
@@ -371,7 +372,7 @@ class IrHttp(models.AbstractModel):
         for url, endpoint in self._generate_routing_rules(mods, converters=self._get_converters()):
             routing = submap(endpoint.routing, ROUTING_KEYS)
             if routing['methods'] is not None and 'OPTIONS' not in routing['methods']:
-                routing['methods'] = [*routing['methods'], 'OPTIONS']
+                routing['methods'] = routing['methods'] + ['OPTIONS']
             rule = FasterRule(url, endpoint=endpoint, **routing)
             rule.merge_slashes = False
             routing_map.add(rule)
@@ -425,4 +426,4 @@ class IrHttp(models.AbstractModel):
 
     @classmethod
     def _is_allowed_cookie(cls, cookie_type):
-        return True if cookie_type == 'required' else bool(request.env.user)
+        return True

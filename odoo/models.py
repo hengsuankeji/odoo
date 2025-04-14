@@ -96,7 +96,6 @@ regex_field_agg = re.compile(r'(\w+)(?::(\w+)(?:\((\w+)\))?)?')  # For read_grou
 regex_read_group_spec = re.compile(r'(\w+)(\.(\w+))?(?::(\w+))?$')  # For _read_group
 
 AUTOINIT_RECALCULATE_STORED_FIELDS = 1000
-GC_UNLINK_LIMIT = 100_000
 
 INSERT_BATCH_SIZE = 100
 UPDATE_BATCH_SIZE = 100
@@ -1569,7 +1568,7 @@ class BaseModel(metaclass=MetaModel):
             xid = record.get('id', False)
             # dbid
             dbid = False
-            if record.get('.id'):
+            if '.id' in record:
                 try:
                     dbid = int(record['.id'])
                 except ValueError:
@@ -1782,31 +1781,13 @@ class BaseModel(metaclass=MetaModel):
         search_fnames = self._rec_names_search or ([self._rec_name] if self._rec_name else [])
         if not search_fnames:
             _logger.warning("Cannot search on display_name, no _rec_name or _rec_names_search defined on %s", self._name)
-            # do not restrain anything
-            return expression.TRUE_DOMAIN
+            return expression.FALSE_DOMAIN
         if operator.endswith('like') and not value and '=' not in operator:
             # optimize out the default criterion of ``like ''`` that matches everything
             # return all when operator is positive
             return expression.FALSE_DOMAIN if operator in expression.NEGATIVE_TERM_OPERATORS else expression.TRUE_DOMAIN
         aggregator = expression.AND if operator in expression.NEGATIVE_TERM_OPERATORS else expression.OR
-        domains = []
-        for field_name in search_fnames:
-            # field_name may be a sequence of field names (partner_id.name)
-            # retrieve the last field in the sequence
-            model = self
-            for fname in field_name.split('.'):
-                field = model._fields[fname]
-                model = self.env.get(field.comodel_name)
-            if field.relational:
-                # relational fields will trigger a _name_search on their comodel
-                domains.append([(field_name, operator, value)])
-                continue
-            try:
-                domains.append([(field_name, operator, field.convert_to_write(value, self))])
-            except ValueError:
-                pass  # ignore that case if the value doesn't match the field type
-
-        return aggregator(domains)
+        return aggregator([[(field_name, operator, value)] for field_name in search_fnames])
 
     @api.model
     def name_create(self, name) -> tuple[int, str] | typing.Literal[False]:
@@ -1967,26 +1948,41 @@ class BaseModel(metaclass=MetaModel):
             return []
 
         query = self._search(domain)
-        query.limit = limit
-        query.offset = offset
 
         groupby_terms: dict[str, SQL] = {
             spec: self._read_group_groupby(spec, query)
             for spec in groupby
         }
-        if groupby_terms:
-            query.groupby = SQL(", ").join(groupby_terms.values())
-            query.having = self._read_group_having(having, query)
-            # _read_group_orderby may possibly extend query.groupby for orderby
-            query.order = self._read_group_orderby(order, groupby_terms, query)
-
         select_terms: list[SQL] = [
             self._read_group_select(spec, query)
             for spec in aggregates
         ]
+        sql_having = self._read_group_having(having, query)
+        sql_order, sql_extra_groupby = self._read_group_orderby(order, groupby_terms, query)
+
+        groupby_terms = list(groupby_terms.values())
+
+        query_parts = [
+            SQL("SELECT %s", SQL(", ").join(groupby_terms + select_terms)),
+            SQL("FROM %s", query.from_clause),
+        ]
+        if query.where_clause:
+            query_parts.append(SQL("WHERE %s", query.where_clause))
+        if groupby_terms:
+            if sql_extra_groupby:
+                groupby_terms.append(sql_extra_groupby)
+            query_parts.append(SQL("GROUP BY %s", SQL(", ").join(groupby_terms)))
+        if sql_having:
+            query_parts.append(SQL("HAVING %s", sql_having))
+        if sql_order:
+            query_parts.append(SQL("ORDER BY %s", sql_order))
+        if limit:
+            query_parts.append(SQL("LIMIT %s", limit))
+        if offset:
+            query_parts.append(SQL("OFFSET %s", offset))
 
         # row_values: [(a1, b1, c1), (a2, b2, c2), ...]
-        row_values = self.env.execute_query(query.select(*groupby_terms.values(), *select_terms))
+        row_values = self.env.execute_query(SQL("\n").join(query_parts))
 
         if not row_values:
             return row_values
@@ -2174,7 +2170,7 @@ class BaseModel(metaclass=MetaModel):
         return stack[0]
 
     def _read_group_orderby(self, order: str, groupby_terms: dict[str, SQL],
-                            query: Query) -> SQL:
+                            query: Query) -> tuple[SQL, SQL]:
         """ Return (<SQL expression>, <SQL expression>)
         corresponding to the given order and groupby terms.
 
@@ -2189,9 +2185,10 @@ class BaseModel(metaclass=MetaModel):
             traverse_many2one = False
 
         if not order:
-            return SQL()
+            return SQL(), SQL()
 
         orderby_terms = []
+        extra_groupby_terms = []
 
         for order_part in order.split(','):
             order_match = regex_order.match(order_part)
@@ -2217,13 +2214,21 @@ class BaseModel(metaclass=MetaModel):
                 traverse_many2one and field and field.type == 'many2one'
                 and self.env[field.comodel_name]._order != 'id'
             ):
-                if sql_order := self._order_to_sql(f'{term} {direction} {nulls}', query):
-                    orderby_terms.append(sql_order)
+                # this generates an extra clause to add in the group by
+                sql_order = self._order_to_sql(f'{term} {direction} {nulls}', query)
+                orderby_terms.append(sql_order)
+                sql_order_str = self.env.cr.mogrify(sql_order).decode()
+                extra_groupby_terms.extend(
+                    SQL(order.strip().split()[0])
+                    for order in sql_order_str.split(",")
+                    if order.strip()
+                )
+
             else:
                 sql_expr = groupby_terms[term]
                 orderby_terms.append(SQL("%s %s %s", sql_expr, sql_direction, sql_nulls))
 
-        return SQL(", ").join(orderby_terms)
+        return SQL(", ").join(orderby_terms), SQL(", ").join(extra_groupby_terms)
 
     @api.model
     def _read_group_empty_value(self, spec):
@@ -2608,7 +2613,7 @@ class BaseModel(metaclass=MetaModel):
                         if granularity == 'week':
                             year, week = date_utils.weeknumber(
                                 babel.Locale.parse(locale),
-                                value,  # provide date or datetime without UTC conversion
+                                range_start,
                             )
                             label = f"W{week} {year:04}"
 
@@ -2965,20 +2970,20 @@ class BaseModel(metaclass=MetaModel):
             return SQL("COALESCE(%s)", SQL(", ").join(sql_field_langs))
 
         if field.company_dependent:
-            sql_field = SQL(
-                "%(column)s->%(company_id)s",
-                column=sql_field,
-                company_id=str(self.env.company.id),
-            )
             fallback = field.get_company_dependent_fallback(self)
             fallback = field.convert_to_column(field.convert_to_write(fallback, self), self)
-            if fallback not in (None, 0):  # 0, 0.0, False, None
-                sql_field = SQL(
-                    'COALESCE(%(field)s, to_jsonb(%(fallback)s::%(column_type)s))',
-                    field=sql_field,
-                    fallback=fallback,
-                    column_type=SQL(field._column_type[1]),
-                )
+            # in _read_group_orderby the result of field to sql will be mogrified and split to
+            # e.g SQL('COALESCE(%s->%s') and SQL('to_jsonb(%s))::boolean') as 2 orderby values
+            # and concatenated by SQL(',') in the final result, which works in an unexpected way
+            sql_field = SQL(
+                "COALESCE(%(column)s->%(company_id)s,to_jsonb(%(fallback)s::%(column_type)s))",
+                column=sql_field,
+                company_id=str(self.env.company.id),
+                fallback=fallback,
+                column_type=SQL(field._column_type[1]),
+            )
+            if field.type in ('boolean', 'integer', 'float', 'monetary'):
+                return SQL('(%s)::%s', sql_field, SQL(field._column_type[1]))
             # here the specified value for a company might be NULL e.g. '{"1": null}'::jsonb
             # the result of current sql_field might be 'null'::jsonb
             # ('null'::jsonb)::text == 'null'
@@ -3228,7 +3233,7 @@ class BaseModel(metaclass=MetaModel):
         ):
             sql = SQL("(%s OR %s IS NULL)", sql, sql_field)
 
-        if not need_wildcard and is_number_field:
+        if not need_wildcard and is_number_field and not field.company_dependent:
             cmp_value = field.convert_to_record(field.convert_to_cache(value, self), self)
             if (
                 operator == '>=' and cmp_value <= 0
@@ -3576,7 +3581,7 @@ class BaseModel(metaclass=MetaModel):
         # registry classes; the purpose of this attribute is to behave as a
         # cache of [c for c in cls.mro() if not is_registry_class(c))], which
         # is heavily used in function fields.resolve_mro()
-        cls._model_classes__ = tuple(c for c in cls.mro() if getattr(c, 'pool', None) is None)
+        cls._model_classes = tuple(c for c in cls.mro() if getattr(c, 'pool', None) is None)
 
         # 1. determine the proper fields of the model: the fields defined on the
         # class and magic fields, not the inherited or custom ones
@@ -3589,7 +3594,7 @@ class BaseModel(metaclass=MetaModel):
 
         # collect the definitions of each field (base definition + overrides)
         definitions = defaultdict(list)
-        for klass in reversed(cls._model_classes__):
+        for klass in reversed(cls._model_classes):
             # this condition is an optimization of is_definition_class(klass)
             if isinstance(klass, MetaModel):
                 for field in klass._field_definitions:
@@ -4270,7 +4275,7 @@ class BaseModel(metaclass=MetaModel):
         """
         if not companies:
             return [('company_id', '=', False)]
-        if isinstance(companies, unquote):
+        if isinstance(companies, str):
             return [('company_id', 'in', unquote(f'{companies} + [False]'))]
         return [('company_id', 'in', to_company_ids(companies) + [False])]
 
@@ -4319,13 +4324,13 @@ class BaseModel(metaclass=MetaModel):
                     _logger.warning(_(
                         "Skipping a company check for model %(model_name)s. Its fields %(field_names)s are set as company-dependent, "
                         "but the model doesn't have a `company_id` or `company_ids` field!",
-                        model_name=self._name, field_names=regular_fields
+                        model_name=self.model_name, field_names=regular_fields
                     ))
                     continue
                 for name in regular_fields:
                     corecord = record.sudo()[name]
                     if corecord:
-                        domain = corecord._check_company_domain(companies) # pylint: disable=0601
+                        domain = corecord._check_company_domain(companies)
                         if domain and not corecord.with_context(active_test=False).filtered_domain(domain):
                             inconsistencies.append((record, name, corecord))
             # The second part of the check (for property / company-dependent fields) verifies that the records
@@ -4543,7 +4548,7 @@ class BaseModel(metaclass=MetaModel):
                 field_ids = tuple(IrModelFields._get_ids(field.model_name).get(field.name) for field in many2one_fields)
                 sub_ids_json_text = tuple(json.dumps(id_) for id_ in sub_ids)
                 if default := Defaults.search([('field_id', 'in', field_ids), ('json_value', 'in', sub_ids_json_text)], limit=1, order='id desc'):
-                    ir_field = default.field_id.sudo()
+                    ir_field = self.env['ir.model.fields'].browse(default.field_id).sudo()
                     field = self.env[ir_field.model]._fields[ir_field.name]
                     record = self.browse(json.loads(default.json_value))
                     raise UserError(_('Unable to delete %(record)s because it is used as the default value of %(field)s', record=record, field=field))
@@ -4985,7 +4990,7 @@ class BaseModel(metaclass=MetaModel):
                     (data['record'], {
                         name: data['inversed'][name]
                         for name in inv_names
-                        if name in data['inversed'] and name not in data['stored']
+                        if name in data['inversed']
                     })
                     for data in data_list
                     if not inv_names.isdisjoint(data['inversed'])
@@ -5455,7 +5460,7 @@ class BaseModel(metaclass=MetaModel):
             existing_modules = self.env['ir.module.module'].sudo().search([]).mapped('name')
             for data in to_create:
                 xml_id = data.get('xml_id')
-                if xml_id and not data.get('noupdate'):
+                if xml_id:
                     module_name, sep, record_id = xml_id.partition('.')
                     if sep and module_name in existing_modules:
                         raise UserError(
@@ -5540,7 +5545,7 @@ class BaseModel(metaclass=MetaModel):
         """
         order = order or self._order
         if not order:
-            return SQL()
+            return []
         self._check_qorder(order)
 
         alias = alias or self._table
@@ -5602,8 +5607,6 @@ class BaseModel(metaclass=MetaModel):
                 sql_field = self._field_to_sql(alias, field_name, query)
 
             if coorder == 'id':
-                if query.groupby:
-                    query.groupby = SQL('%s, %s', query.groupby, sql_field)
                 return SQL("%s %s %s", sql_field, direction, nulls)
 
             # instead of ordering by the field's raw value, use the comodel's
@@ -5632,8 +5635,6 @@ class BaseModel(metaclass=MetaModel):
         sql_field = self._field_to_sql(alias, field_name, query)
         if field.type == 'boolean':
             sql_field = SQL("COALESCE(%s, FALSE)", sql_field)
-        if query.groupby:
-            query.groupby = SQL('%s, %s', query.groupby, sql_field)
 
         return SQL("%s %s %s", sql_field, direction, nulls)
 
@@ -7443,16 +7444,13 @@ class TransientModel(Model):
         # Never delete rows used in last 5 minutes
         seconds = max(seconds, 300)
         self._cr.execute(SQL(
-            "SELECT id FROM %s WHERE %s < %s %s",
+            "SELECT id FROM %s WHERE %s < %s",
             SQL.identifier(self._table),
             SQL("COALESCE(write_date, create_date, (now() AT TIME ZONE 'UTC'))::timestamp"),
             SQL("(now() AT TIME ZONE 'UTC') - interval %s", f"{seconds} seconds"),
-            SQL(f"LIMIT { GC_UNLINK_LIMIT }"),
         ))
         ids = [x[0] for x in self._cr.fetchall()]
         self.sudo().browse(ids).unlink()
-        if len(ids) >= GC_UNLINK_LIMIT:
-            self.env.ref('base.autovacuum_job')._trigger()
 
 
 def itemgetter_tuple(items):

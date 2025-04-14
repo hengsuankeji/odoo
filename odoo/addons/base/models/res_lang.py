@@ -10,8 +10,7 @@ from typing import Any, Literal
 
 from odoo import api, fields, models, tools, _
 from odoo.exceptions import UserError, ValidationError
-from odoo.tools import OrderedSet
-from odoo.tools.misc import ReadonlyDict
+from odoo.tools import OrderedSet, frozendict
 
 _logger = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ DEFAULT_TIME_FORMAT = '%H:%M:%S'
 DEFAULT_SHORT_TIME_FORMAT = '%H:%M'
 
 
-class LangData(ReadonlyDict):
+class LangData(frozendict):
     """ A ``dict``-like class which can access field value like a ``res.lang`` record.
     Note: This data class cannot store data for fields with the same name as
     ``dict`` methods, like ``dict.keys``.
@@ -37,7 +36,7 @@ class LangData(ReadonlyDict):
             raise AttributeError
 
 
-class LangDataDict(ReadonlyDict):
+class LangDataDict(frozendict):
     """ A ``dict`` of :class:`LangData` objects indexed by some key, which returns
     a special dummy :class:`LangData` for missing keys.
     """
@@ -281,7 +280,6 @@ class Lang(models.Model):
         return self._get_data(code=code).code
 
     @api.model
-    @api.readonly
     def get_installed(self) -> list[tuple[str, str]]:
         """ Return installed languages' (code, name) pairs sorted by name. """
         return [(code, data.name) for code, data in self._get_active_by('code').items()]

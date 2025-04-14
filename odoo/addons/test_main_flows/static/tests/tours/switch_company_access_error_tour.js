@@ -11,6 +11,7 @@ function assertEqual(actual, expected, msg = "") {
 }
 
 registry.category("web_tour.tours").add("test_company_switch_access_error", {
+    test: true,
     steps: () => [
         {
             trigger: ".o_list_view",

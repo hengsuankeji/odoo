@@ -34,14 +34,6 @@ class ResDeviceLog(models.Model):
     is_current = fields.Boolean("Current Device", compute="_compute_is_current")
     linked_ip_addresses = fields.Text("Linked IP address", compute="_compute_linked_ip_addresses")
 
-    def init(self):
-        self.env.cr.execute(SQL("""
-            CREATE INDEX IF NOT EXISTS res_device_log__composite_idx ON %s
-            (user_id, session_identifier, platform, browser, last_activity, id) WHERE revoked = False
-        """,
-            SQL.identifier(self._table)
-        ))
-
     def _compute_display_name(self):
         for device in self:
             platform = device.platform or _("Unknown")
@@ -142,7 +134,6 @@ class ResDevice(models.Model):
     _inherit = ["res.device.log"]
     _description = "Devices"
     _auto = False
-    _order = 'last_activity desc'
 
     @check_identity
     def revoke(self):
@@ -162,7 +153,7 @@ class ResDevice(models.Model):
 
     @api.model
     def _select(self):
-        return "SELECT D.*"
+        return "SELECT DISTINCT ON (D.user_id, D.session_identifier, D.platform, D.browser) D.*"
 
     @api.model
     def _from(self):
@@ -170,28 +161,18 @@ class ResDevice(models.Model):
 
     @api.model
     def _where(self):
+        return "WHERE D.revoked = False"
+
+    @api.model
+    def _order_by(self):
         return """
-            WHERE
-                NOT EXISTS (
-                    SELECT 1
-                    FROM res_device_log D2
-                    WHERE
-                        D2.user_id = D.user_id
-                        AND D2.session_identifier = D.session_identifier
-                        AND D2.platform IS NOT DISTINCT FROM D.platform
-                        AND D2.browser IS NOT DISTINCT FROM D.browser
-                        AND (
-                            D2.last_activity > D.last_activity
-                            OR (D2.last_activity = D.last_activity AND D2.id > D.id)
-                        )
-                        AND D2.revoked = False
-                )
-                AND D.revoked = False
+            ORDER BY D.user_id, D.session_identifier, D.platform, D.browser,
+            D.last_activity DESC, D.id DESC
         """
 
     @property
     def _query(self):
-        return "%s %s %s" % (self._select(), self._from(), self._where())
+        return "%s %s %s %s" % (self._select(), self._from(), self._where(), self._order_by())
 
     def init(self):
         tools.drop_view_if_exists(self.env.cr, self._table)
