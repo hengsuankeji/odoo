@@ -13,7 +13,7 @@ services:
       - odoo-network
 
   odoo:
-    image: ultra:2.0
+    image: the-one-erp:3.0
     depends_on:
       - db
     ports:

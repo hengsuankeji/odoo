@@ -8,8 +8,7 @@ ENV LANG=en_US.UTF-8
 # Retrieve the target architecture to install the correct wkhtmltopdf package
 ARG TARGETARCH
 
-# Install some deps, lessc and less-plugin-clean-css, and wkhtmltopdf
-
+# Install essential deps, lessc and less-plugin-clean-css, and wkhtmltopdf
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --no-install-recommends \
@@ -36,11 +35,10 @@ RUN apt-get update && \
     python3-watchdog \
     python3-xlrd \
     python3-xlwt \
-    python3-full \
     python3-venv \
     python3-dev \
     libpq-dev \
-    postgresql-server-dev-all \
+    postgresql-client \
     build-essential \
     libldap2-dev \
     libsasl2-dev \
@@ -57,49 +55,39 @@ RUN apt-get update && \
     && curl -o wkhtmltox.deb -sSL https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_${WKHTMLTOPDF_ARCH}.deb \
     && echo ${WKHTMLTOPDF_SHA} wkhtmltox.deb | sha1sum -c - \
     && apt-get install -y --no-install-recommends ./wkhtmltox.deb \
-    && rm -rf /var/lib/apt/lists/* wkhtmltox.deb
+    && npm install -g rtlcss \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* wkhtmltox.deb /tmp/* /var/tmp/*
 
-# install latest postgresql-client
-RUN echo 'deb http://apt.postgresql.org/pub/repos/apt/ noble-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
-    && GNUPGHOME="$(mktemp -d)" \
-    && export GNUPGHOME \
-    && repokey='B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8' \
-    && gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "${repokey}" \
-    && gpg --batch --armor --export "${repokey}" > /etc/apt/trusted.gpg.d/pgdg.gpg.asc \
-    && gpgconf --kill all \
-    && rm -rf "$GNUPGHOME" \
-    && apt-get update  \
-    && apt-get install --no-install-recommends -y postgresql-client \
-    && rm -f /etc/apt/sources.list.d/pgdg.list \
-    && rm -rf /var/lib/apt/lists/*
+# Install Odoo - 首先复制入口脚本
+COPY entrypoint.sh /entrypoint.sh
+COPY wait-for-psql.py /usr/local/bin/wait-for-psql.py
+RUN chmod +x /entrypoint.sh /usr/local/bin/wait-for-psql.py
 
-# Install rtlcss (on Debian buster)
-RUN npm install -g rtlcss
+# 复制其他文件
+COPY requirements.txt /opt/odoo/
+COPY ./odoo.conf /etc/odoo/
 
-# Install Odoo
-COPY . /opt/odoo
 WORKDIR /opt/odoo
 
 # Create and activate virtual environment
-RUN python3 -m venv /opt/venv
+RUN python3 -m venv /opt/venv && \
+    . /opt/venv/bin/activate && \
+    pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir -r requirements.txt && \
+    pip3 cache purge
+
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Create Odoo user and set permissions
+RUN useradd -md /home/odoo -s /bin/false odoo && \
+    mkdir -p /mnt/extra-addons /var/lib/odoo && \
+    chown -R odoo:odoo /opt/odoo /opt/venv /etc/odoo /mnt/extra-addons /var/lib/odoo
 
-# Create Odoo user
-RUN useradd -md /home/odoo -s /bin/false odoo \
-    && chown -R odoo /opt/odoo \
-    && chown -R odoo /opt/venv
+# Copy Odoo source code (only after installing dependencies to leverage layer caching)
+COPY --chown=odoo:odoo . /opt/odoo
 
-# Copy entrypoint script and Odoo configuration file
-COPY ./entrypoint.sh /
-COPY ./odoo.conf /etc/odoo/
-
-# Set permissions and Mount /var/lib/odoo to allow restoring filestore and /mnt/extra-addons for users addons
-RUN chown odoo /etc/odoo/odoo.conf \
-    && mkdir -p /mnt/extra-addons \
-    && chown -R odoo /mnt/extra-addons
+# Odoo data volumes
 VOLUME ["/var/lib/odoo", "/mnt/extra-addons"]
 
 # Expose Odoo services
@@ -108,9 +96,6 @@ EXPOSE 8069 8071 8072
 # Set the default config file
 ENV ODOO_RC=/etc/odoo/odoo.conf
 
-COPY wait-for-psql.py /usr/local/bin/wait-for-psql.py
-RUN chmod +x /entrypoint.sh && \
-    chmod +x /usr/local/bin/wait-for-psql.py
 # Set default user when running the container
 USER odoo
 
