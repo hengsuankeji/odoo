@@ -16,7 +16,7 @@
 
 ```bash
 # 构建镜像（注意最后的点 . 不要忘记）
-docker build -t ultron:1.0 .
+docker build -t h1:1.0 .
 ```
 
 ### 启动项目

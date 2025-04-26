@@ -1,4 +1,4 @@
-FROM ubuntu:noble
+FROM ubuntu:noble AS builder
 
 SHELL ["/bin/bash", "-xo", "pipefail", "-c"]
 
@@ -8,40 +8,23 @@ ENV LANG=en_US.UTF-8
 # Retrieve the target architecture to install the correct wkhtmltopdf package
 ARG TARGETARCH
 
-# Install essential deps, lessc and less-plugin-clean-css, and wkhtmltopdf
+# Install only essential build dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    dirmngr \
-    fonts-noto-cjk \
     gnupg \
     libssl-dev \
-    node-less \
-    npm \
-    python3-magic \
-    python3-num2words \
-    python3-odf \
-    python3-pdfminer \
     python3-pip \
-    python3-phonenumbers \
-    python3-pyldap \
-    python3-qrcode \
-    python3-renderpm \
-    python3-setuptools \
-    python3-slugify \
-    python3-vobject \
-    python3-watchdog \
-    python3-xlrd \
-    python3-xlwt \
     python3-venv \
     python3-dev \
     libpq-dev \
-    postgresql-client \
     build-essential \
     libldap2-dev \
     libsasl2-dev \
+    node-less \
+    npm \
     xz-utils && \
     if [ -z "${TARGETARCH}" ]; then \
     TARGETARCH="$(dpkg --print-architecture)"; \
@@ -59,33 +42,73 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* wkhtmltox.deb /tmp/* /var/tmp/*
 
-# Install Odoo - 首先复制入口脚本
-COPY entrypoint.sh /entrypoint.sh
-COPY wait-for-psql.py /usr/local/bin/wait-for-psql.py
-RUN chmod +x /entrypoint.sh /usr/local/bin/wait-for-psql.py
-
-# 复制其他文件
-COPY requirements.txt /opt/odoo/
-COPY ./odoo.conf /etc/odoo/
-
-WORKDIR /opt/odoo
-
-# Create and activate virtual environment
-RUN python3 -m venv /opt/venv && \
-    . /opt/venv/bin/activate && \
-    pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir -r requirements.txt && \
-    pip3 cache purge
-
+# Setup virtual environment
+RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Create Odoo user and set permissions
-RUN useradd -md /home/odoo -s /bin/false odoo && \
-    mkdir -p /mnt/extra-addons /var/lib/odoo && \
-    chown -R odoo:odoo /opt/odoo /opt/venv /etc/odoo /mnt/extra-addons /var/lib/odoo
+# Copy requirements first for better caching
+COPY requirements.txt /tmp/
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir -r /tmp/requirements.txt && \
+    pip3 cache purge
 
-# Copy Odoo source code (only after installing dependencies to leverage layer caching)
-COPY --chown=odoo:odoo . /opt/odoo
+# Second stage - final image
+FROM ubuntu:noble
+
+SHELL ["/bin/bash", "-xo", "pipefail", "-c"]
+ENV LANG=en_US.UTF-8
+ARG TARGETARCH
+
+# Install only runtime dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    fonts-noto-cjk \
+    libssl-dev \
+    node-less \
+    npm \
+    python3-magic \
+    python3-num2words \
+    python3-odf \
+    python3-pdfminer \
+    python3-phonenumbers \
+    python3-pyldap \
+    python3-qrcode \
+    python3-renderpm \
+    python3-slugify \
+    python3-vobject \
+    python3-watchdog \
+    python3-xlrd \
+    python3-xlwt \
+    python3 \
+    postgresql-client \
+    libpq5 \
+    wkhtmltopdf && \
+    npm install -g rtlcss && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    # Create Odoo user
+    useradd -md /home/odoo -s /bin/false odoo && \
+    mkdir -p /mnt/extra-addons /var/lib/odoo /etc/odoo && \
+    chown -R odoo:odoo /mnt/extra-addons /var/lib/odoo /etc/odoo
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy Odoo files
+COPY --chown=odoo:odoo entrypoint.sh /entrypoint.sh
+COPY --chown=odoo:odoo wait-for-psql.py /usr/local/bin/wait-for-psql.py
+COPY --chown=odoo:odoo ./odoo.conf /etc/odoo/
+
+# Copy only necessary Odoo source files, excluding .git directories and other unnecessary files
+WORKDIR /opt/odoo
+COPY --chown=odoo:odoo ./addons /opt/odoo/addons
+COPY --chown=odoo:odoo ./odoo /opt/odoo/odoo
+COPY --chown=odoo:odoo ./odoo-bin /opt/odoo/
+
+RUN chmod +x /entrypoint.sh /usr/local/bin/wait-for-psql.py
 
 # Odoo data volumes
 VOLUME ["/var/lib/odoo", "/mnt/extra-addons"]
