@@ -55,3 +55,4 @@ package.json
 /odoo-venv/
 /data/
 *.log
+/venv/
